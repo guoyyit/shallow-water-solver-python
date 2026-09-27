@@ -241,13 +241,18 @@ Per-request timeout: `POST /jobs?timeout=30` or a `timeout` body field on
   previous or new file, never a torn/partial write. No `*.tmp` is left behind.
 - A checkpoint stores the request plus the full numerical state
   `(eta, hu, hv, b)` and the committed `time/step`.
-- Cancellation and timeout **keep** the last checkpoint; the job becomes
-  `cancelled` and exposes no intermediate result, but `/resume` continues from
-  the committed time.
-- On startup the manager scans the store; records left `running` by a crashed
-  process are resumed from their newest checkpoint. The first checkpoint after
-  restart is at or beyond the pre-crash step — committed work is **never
-  recomputed from the initial condition** (explicitly asserted).
+- **Explicit cancellation** (`POST /cancel`) and **timeout** keep the last
+  checkpoint and set the job to a terminal `cancelled`; no intermediate result
+  is served. Such a job is *not* restarted automatically — it only continues
+  when you call `/resume` — and resumes from the committed time.
+- **Service shutdown** (SIGINT / graceful stop) with an unfinished job leaves
+  it marked `running` with its last checkpoint. On startup the manager scans
+  the store and resumes those `running` jobs from their newest checkpoint; the
+  first checkpoint after restart is at or beyond the pre-stop step, so
+  committed work is **never recomputed from the initial condition**
+  (explicitly asserted in the tests).
+- Orphaned `.*.tmp` files left by a process that died mid-write are removed
+  when the store is opened; they are never-visible partial writes.
 
 The service is designed for a **single process owning a store directory**. Do
 not run two processes against the same `SWS_STORE` concurrently (no distributed
