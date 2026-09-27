@@ -99,9 +99,10 @@ def test_restart_resumes_from_last_checkpoint(tmp_path, walls):
     # persisted as CANCELLED with its last committed checkpoint.
     m1.shutdown(wait=True)
 
-    # The on-disk record must carry a committed checkpoint below the target.
+    # The on-disk record must remain RUNNING (interrupted, auto-resumable) and
+    # carry a committed checkpoint below the target.
     disk = JobStore(root).load_record(jid)
-    assert disk.status in (JobStatus.RUNNING, JobStatus.CANCELLED)
+    assert disk.status is JobStatus.RUNNING
     ck = JobStore(root).load_checkpoint(jid)
     assert ck is not None and ck[2] > 0.0
     assert ck[2] < 0.6
@@ -119,6 +120,30 @@ def test_restart_resumes_from_last_checkpoint(tmp_path, walls):
         assert progress, "no checkpoint observed after restart"
         assert progress[0][1] >= ck[3]
         assert progress[0][0] >= ck[2] - 1e-12
+    finally:
+        m2.shutdown()
+
+
+def test_user_cancelled_job_is_not_auto_resumed_on_restart(tmp_path, walls):
+    root = tmp_path / "jobs2"
+    eta, b = dambreak(n=32)
+    req = make_request(eta, b, walls, target_time=2.0, checkpoint_every=1)
+
+    m1 = JobManager(JobStore(root), max_workers=2)
+    m1.start()
+    jid = m1.submit(req).job_id
+    time.sleep(0.05)
+    assert m1.cancel(jid)  # explicit USER cancellation
+    _wait(m1, jid)
+    m1.shutdown(wait=True)
+    assert JobStore(root).load_record(jid).status is JobStatus.CANCELLED
+
+    # A fresh manager must leave a user-cancelled job stopped.
+    m2 = JobManager(JobStore(root), max_workers=2)
+    m2.start()
+    try:
+        time.sleep(0.15)
+        assert m2.get(jid).status is JobStatus.CANCELLED
     finally:
         m2.shutdown()
 

@@ -70,18 +70,10 @@ class JobManager:
         for rec in self.store.all_records():
             with self._lock:
                 self._jobs[rec.job_id] = rec
-            target = rec.request.config.target_time if rec.request else 0.0
             if rec.status is JobStatus.RUNNING:
-                # A previous process died mid-run; continue from checkpoint.
-                self._resume(rec.job_id)
-            elif (
-                rec.status is JobStatus.CANCELLED
-                and rec.time > 0.0
-                and rec.time < target - 1e-9
-            ):
-                # Stopped (shutdown/timeout/cancel) with committed progress and
-                # unfinished target: resume from the newest checkpoint rather
-                # than recomputing from the initial condition.
+                # A previous process died/stopped mid-run; continue from the
+                # newest checkpoint. Explicitly CANCELLED jobs are terminal and
+                # are only resumed via the explicit /resume endpoint.
                 self._resume(rec.job_id)
 
     def shutdown(self, wait: bool = True) -> None:
@@ -94,7 +86,7 @@ class JobManager:
         with self._lock:
             tokens = list(self._tokens.values())
         for token in tokens:
-            token.cancel()
+            token.cancel("shutdown")
         self._executor.shutdown(wait=wait, cancel_futures=False)
 
     # -- public API ---------------------------------------------------------
@@ -267,12 +259,24 @@ class JobManager:
                 on_checkpoint=on_checkpoint,
             )
         except SolverError as exc:
-            # Cancellation/timeout are expected stops; the last committed
-            # checkpoint remains on disk and the job can be resumed.
-            terminal = {
-                FailureReason.CANCELLED: JobStatus.CANCELLED,
-                FailureReason.TIMEOUT: JobStatus.CANCELLED,
-            }.get(exc.reason, JobStatus.FAILED)
+            if exc.reason is FailureReason.CANCELLED and token.cause == "shutdown":
+                # Service shutdown: keep the job RUNNING (interrupted) with its
+                # last committed checkpoint so the next process auto-resumes it
+                # rather than treating it as a terminal user cancellation.
+                self._patch(
+                    job_id,
+                    status=JobStatus.RUNNING,
+                    failure_reason=None,
+                    failure_message=None,
+                    updated_at=time.time(),
+                )
+                return
+            # User cancellation or timeout are terminal stops; the last
+            # committed checkpoint remains on disk for an explicit /resume.
+            if exc.reason in (FailureReason.CANCELLED, FailureReason.TIMEOUT):
+                terminal = JobStatus.CANCELLED
+            else:
+                terminal = JobStatus.FAILED
             self._patch(
                 job_id,
                 status=terminal,

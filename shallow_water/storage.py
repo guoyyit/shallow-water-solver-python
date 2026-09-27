@@ -29,6 +29,13 @@ class JobStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        # Remove temp files orphaned by a process that died mid-write: they are
+        # never-visible partial writes and must not be mistaken for data.
+        for tmp in self.root.glob("**/.*.tmp"):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     def job_dir(self, job_id: str) -> Path:
         d = self.root / job_id

@@ -141,13 +141,21 @@ class JobRecord(BaseModel):
 
 
 class CancellationToken:
-    """Simple cooperative cancellation flag (per job, no shared mutable state)."""
+    """Cooperative cancellation flag (per job, no shared mutable state).
+
+    ``cause`` records who requested the stop: ``"user"`` (explicit cancel),
+    ``"shutdown"`` (the service is stopping and the job should remain an
+    interruptible RUNNING job for the next process) or ``None``.
+    """
 
     def __init__(self) -> None:
         self._cancelled = False
+        self.cause: str | None = None
 
-    def cancel(self) -> None:
+    def cancel(self, cause: str = "user") -> None:
         self._cancelled = True
+        if self.cause is None:
+            self.cause = cause
 
     @property
     def cancelled(self) -> bool:
