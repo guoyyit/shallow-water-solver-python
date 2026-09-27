@@ -138,7 +138,7 @@ def test_step_matches_checkpoint_then_continue(walls):
 
     snap = {}
 
-    def hook(state, t, step):
+    def hook(state, t, step, final_result=None):
         if step == 20:
             snap["state"] = state
 

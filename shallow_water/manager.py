@@ -70,16 +70,32 @@ class JobManager:
         for rec in self.store.all_records():
             with self._lock:
                 self._jobs[rec.job_id] = rec
+            target = rec.request.config.target_time if rec.request else 0.0
             if rec.status is JobStatus.RUNNING:
                 # A previous process died mid-run; continue from checkpoint.
                 self._resume(rec.job_id)
+            elif (
+                rec.status is JobStatus.CANCELLED
+                and rec.time > 0.0
+                and rec.time < target - 1e-9
+            ):
+                # Stopped (shutdown/timeout/cancel) with committed progress and
+                # unfinished target: resume from the newest checkpoint rather
+                # than recomputing from the initial condition.
+                self._resume(rec.job_id)
 
     def shutdown(self, wait: bool = True) -> None:
+        """Signal every running job to stop, then (by default) join its thread.
+
+        A graceful shutdown guarantees no worker thread is left writing to the
+        store, so another manager can safely take over the same directory.
+        Each job's last committed checkpoint is kept and remains resumable.
+        """
         with self._lock:
-            futures = list(self._futures.values())
+            tokens = list(self._tokens.values())
+        for token in tokens:
+            token.cancel()
         self._executor.shutdown(wait=wait, cancel_futures=False)
-        for f in futures:
-            f.cancel()
 
     # -- public API ---------------------------------------------------------
     def submit(
@@ -211,20 +227,36 @@ class JobManager:
     ) -> None:
         """Boundary of a job: every outcome is captured and persisted."""
 
-        def on_checkpoint(cstate: dict, ctime: float, cstep: int) -> None:
+        def on_checkpoint(
+            cstate: dict, ctime: float, cstep: int, final_result: SolveResult | None = None
+        ) -> None:
             self.store.save_checkpoint(job_id, request, cstate, ctime, cstep)
             if self.on_progress is not None:
                 try:
                     self.on_progress(job_id, ctime, cstep)
                 except Exception:
                     pass
-            self._patch(
-                job_id,
-                time=ctime,
-                step=cstep,
-                status=JobStatus.RUNNING,
-                updated_at=time.time(),
-            )
+            if final_result is not None:
+                # Terminal checkpoint: publish the completed record (with the
+                # result) in the same logical commit as the state file.
+                self._patch(
+                    job_id,
+                    time=ctime,
+                    step=cstep,
+                    status=JobStatus.COMPLETED,
+                    result=final_result,
+                    failure_reason=None,
+                    failure_message=None,
+                    updated_at=time.time(),
+                )
+            else:
+                self._patch(
+                    job_id,
+                    time=ctime,
+                    step=cstep,
+                    status=JobStatus.RUNNING,
+                    updated_at=time.time(),
+                )
 
         try:
             result = solve(
@@ -277,8 +309,12 @@ class JobManager:
         with self._lock:
             rec = self._jobs[job_id]
             updated = rec.model_copy(update=changes)
+            # Persist BEFORE publishing the new state in memory: anyone that
+            # observes the terminal status via get() is guaranteed the durable
+            # record already matches (no window where memory says done but the
+            # file on disk still shows the previous status).
+            self.store.save_record(updated)
             self._jobs[job_id] = updated
-        self._commit(updated)
         return updated
 
     def _commit(self, record: JobRecord) -> None:

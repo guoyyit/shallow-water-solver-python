@@ -46,7 +46,7 @@ from .models import (
 _DRY = 1.0e-6          # depth below which a cell is treated as dry
 _NEG_TOL = 1.0e-6      # |negative h| tolerated after a step (clipped)
 
-CheckpointHook = Callable[[dict[str, Any], float, int], None]
+CheckpointHook = Callable[[dict[str, Any], float, int, "SolveResult | None"], None]
 
 
 class ShallowWaterSolver:
@@ -412,6 +412,18 @@ class ShallowWaterSolver:
                 # Entirely stationary (flat lake, no driving boundary): nothing
                 # can ever change; jump to the requested time.
                 self.time = target
+
+        def _emit_checkpoint(final_result: SolveResult | None = None) -> None:
+            if on_checkpoint is not None:
+                on_checkpoint(self.to_state(), self.time, self.step, final_result)
+
+        if self.time >= target:
+            # Already at target (stationary jump or fully restored): the only
+            # checkpoint is the terminal one carrying the result.
+            result = self.result()
+            _emit_checkpoint(result)
+            return result
+
         while self.time < target:
             _cancelled()
             dt = self.compute_dt()
@@ -426,10 +438,12 @@ class ShallowWaterSolver:
                     FailureReason.MAX_STEPS,
                     f"max_steps={cfg.max_steps} reached at t={self.time}",
                 )
-            if on_checkpoint is not None and (
-                self.step % cfg.checkpoint_every == 0 or self.time >= target
-            ):
-                on_checkpoint(self.to_state(), self.time, self.step)
+            if self.time >= target:
+                # Terminal checkpoint: publish the result together with the
+                # state so no observer can see a stale RUNNING record.
+                _emit_checkpoint(self.result())
+            elif self.step % cfg.checkpoint_every == 0:
+                _emit_checkpoint(None)
         return self.result()
 
     def result(self) -> SolveResult:

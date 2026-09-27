@@ -94,14 +94,17 @@ def test_restart_resumes_from_last_checkpoint(tmp_path, walls):
     rec = m1.submit(req)
     jid = rec.job_id
     time.sleep(0.05)
-    # Hard "crash": drop the manager without signalling cancellation.
-    m1.shutdown(wait=False)
+    # Process stop: graceful shutdown cancels and JOINS the worker thread, so
+    # no thread is left writing to the store when m2 takes over. The job is
+    # persisted as CANCELLED with its last committed checkpoint.
+    m1.shutdown(wait=True)
 
-    # The on-disk record must still be RUNNING with a committed checkpoint.
+    # The on-disk record must carry a committed checkpoint below the target.
     disk = JobStore(root).load_record(jid)
-    assert disk.status is JobStatus.RUNNING
+    assert disk.status in (JobStatus.RUNNING, JobStatus.CANCELLED)
     ck = JobStore(root).load_checkpoint(jid)
     assert ck is not None and ck[2] > 0.0
+    assert ck[2] < 0.6
 
     m2 = JobManager(JobStore(root), max_workers=2)
     progress: list[tuple[float, int]] = []
