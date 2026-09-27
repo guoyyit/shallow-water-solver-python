@@ -27,6 +27,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from .models import (
@@ -51,10 +52,12 @@ class JobManager:
         store: JobStore,
         max_workers: int = 4,
         default_timeout: float | None = None,
+        on_progress: "Callable[[str, float, int], None] | None" = None,
     ) -> None:
         self.store = store
         self.max_workers = max_workers
         self.default_timeout = default_timeout
+        self.on_progress = on_progress
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._lock = threading.Lock()
         self._jobs: dict[str, JobRecord] = {}
@@ -209,7 +212,12 @@ class JobManager:
         """Boundary of a job: every outcome is captured and persisted."""
 
         def on_checkpoint(cstate: dict, ctime: float, cstep: int) -> None:
-            cid = self.store.save_checkpoint(job_id, request, cstate, ctime, cstep)
+            self.store.save_checkpoint(job_id, request, cstate, ctime, cstep)
+            if self.on_progress is not None:
+                try:
+                    self.on_progress(job_id, ctime, cstep)
+                except Exception:
+                    pass
             self._patch(
                 job_id,
                 time=ctime,
